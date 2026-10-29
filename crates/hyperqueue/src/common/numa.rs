@@ -111,7 +111,7 @@ pub fn detect_numa_nodes() -> Vec<NumaNodeInfo> {
                     read_trimmed(path.join("cpulist")).unwrap_or_else(|| "N/A".to_string());
                 let cpu_count = count_cpus_in_list(&cpulist);
 
-                let (mem_total, mem_free, _) = parse_node_meminfo(&path.join("meminfo"));
+                let (mem_total, mem_free) = parse_node_meminfo(&path.join("meminfo"));
                 let distances = parse_node_distances(&path.join("distance"));
 
                 nodes.push(NumaNodeInfo {
@@ -187,11 +187,11 @@ pub fn detect_gpus() -> Vec<GpuPciInfo> {
         let base_class = (class_id >> 16) as u8;
         let is_display_or_3d = base_class == 0x03;
         let is_accelerator = base_class == 0x12;
-        let is_known_gpu_vendor = vendor_id == 0x10de // NVIDIA
-            || vendor_id == 0x1002 // AMD
-            || vendor_id == 0x1da3; // Habana / Gaudi
 
-        if !is_display_or_3d && !is_accelerator && !is_known_gpu_vendor {
+        // Only accept Display/3D controllers or Processing Accelerators.
+        // This filters out audio controllers (PCI class 0x0403), USB controllers (0x0c03),
+        // and other non-GPU companion functions on multi-function graphics cards.
+        if !is_display_or_3d && !is_accelerator {
             continue;
         }
 
@@ -275,34 +275,25 @@ pub fn count_cpus_in_list(list: &str) -> usize {
 }
 
 /// Parses per-node `/sys/devices/system/node/nodeX/meminfo`
-fn parse_node_meminfo(path: &Path) -> (Option<u64>, Option<u64>, Option<u64>) {
+fn parse_node_meminfo(path: &Path) -> (Option<u64>, Option<u64>) {
     let file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return (None, None, None),
+        Err(_) => return (None, None),
     };
     let reader = io::BufReader::new(file);
 
     let mut mem_total = None;
     let mut mem_free = None;
-    let mut mem_used = None;
 
     for line in reader.lines().map_while(Result::ok) {
         if line.contains("MemTotal:") {
             mem_total = extract_kb_from_line(&line);
         } else if line.contains("MemFree:") {
             mem_free = extract_kb_from_line(&line);
-        } else if line.contains("MemUsed:") {
-            mem_used = extract_kb_from_line(&line);
         }
     }
 
-    if mem_used.is_none()
-        && let (Some(t), Some(f)) = (mem_total, mem_free)
-    {
-        mem_used = Some(t.saturating_sub(f));
-    }
-
-    (mem_total, mem_free, mem_used)
+    (mem_total, mem_free)
 }
 
 /// Parses system-wide `/proc/meminfo`
@@ -330,7 +321,8 @@ fn parse_proc_meminfo() -> (Option<u64>, Option<u64>) {
 
 fn extract_kb_from_line(line: &str) -> Option<u64> {
     line.split_whitespace()
-        .nth(line.split_whitespace().count().saturating_sub(2))
+        .rev()
+        .nth(1)
         .and_then(|val| val.parse::<u64>().ok())
 }
 
